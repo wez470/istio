@@ -25,6 +25,7 @@ import (
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
@@ -44,6 +45,7 @@ func TestRequestAuthentication(t *testing.T) {
 	payload1 := strings.Split(jwt.TokenIssuer1, ".")[1]
 	payload2 := strings.Split(jwt.TokenIssuer2, ".")[1]
 	framework.NewTest(t).
+		Features("security.authentication.jwt").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "req-authn",
@@ -318,6 +320,7 @@ func TestRequestAuthentication(t *testing.T) {
 // The policy is also set at global namespace, with authorization on ingressgateway.
 func TestIngressRequestAuthentication(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authentication.ingressjwt").
 		Run(func(ctx framework.TestContext) {
 			ingr := ist.IngressFor(ctx.Clusters().Default())
 
@@ -329,7 +332,7 @@ func TestIngressRequestAuthentication(t *testing.T) {
 			// Apply the policy.
 			namespaceTmpl := map[string]string{
 				"Namespace":     ns.Name(),
-				"RootNamespace": rootNamespace,
+				"RootNamespace": istio.GetOrFail(ctx, ctx).Settings().SystemNamespace,
 			}
 
 			applyPolicy := func(filename string, ns namespace.Instance) []string {

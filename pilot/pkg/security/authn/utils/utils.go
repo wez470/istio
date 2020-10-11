@@ -25,13 +25,24 @@ import (
 	authn_model "istio.io/istio/pilot/pkg/security/model"
 	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
 	protovalue "istio.io/istio/pkg/proto"
-	"istio.io/istio/pkg/spiffe"
 	"istio.io/pkg/log"
 )
 
 const (
 	// Service account for Pilot (hardcoded values at setup time)
 	PilotSvcAccName string = "istio-pilot-service-account"
+)
+
+var (
+	// SupportedCiphers for server side TLS configuration.
+	SupportedCiphers = []string{
+		"ECDHE-ECDSA-AES256-GCM-SHA384",
+		"ECDHE-RSA-AES256-GCM-SHA384",
+		"ECDHE-ECDSA-AES128-GCM-SHA256",
+		"ECDHE-RSA-AES128-GCM-SHA256",
+		"AES256-GCM-SHA384",
+		"AES128-GCM-SHA256",
+	}
 )
 
 // BuildInboundFilterChain returns the filter chain(s) corresponding to the mTLS mode.
@@ -77,7 +88,17 @@ func BuildInboundFilterChain(mTLSMode model.MutualTLSMode, sdsUdsPath string, no
 			},
 			RequireClientCertificate: protovalue.BoolTrue,
 		}
+
+		if features.EnableTLSv2OnInboundPath {
+			// Set Minimum TLS version to match the default client version and allowed strong cipher suites for sidecars.
+			ctx.CommonTlsContext.TlsParams = &tls.TlsParameters{
+				TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+				CipherSuites:              SupportedCiphers,
+			}
+		}
+
 	}
+
 	authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, meta, sdsUdsPath, []string{} /*subjectAltNames*/, trustDomainAliases)
 
 	if mTLSMode == model.MTLSStrict {
@@ -103,13 +124,4 @@ func BuildInboundFilterChain(mTLSMode model.MutualTLSMode, sdsUdsPath string, no
 		}
 	}
 	return nil
-}
-
-// GetSAN returns the SAN used for passed in identity for mTLS.
-func GetSAN(ns string, identity string) string {
-
-	if ns != "" {
-		return spiffe.MustGenSpiffeURI(ns, identity)
-	}
-	return spiffe.GenCustomSpiffe(identity)
 }

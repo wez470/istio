@@ -33,18 +33,15 @@ import (
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	securityModel "istio.io/istio/pilot/pkg/security/model"
-	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pilot/pkg/util/network"
 	"istio.io/istio/pkg/cmd"
 	"istio.io/istio/pkg/config/constants"
-	"istio.io/istio/pkg/dns"
 	"istio.io/istio/pkg/envoy"
 	istio_agent "istio.io/istio/pkg/istio-agent"
 	"istio.io/istio/pkg/jwt"
 	"istio.io/istio/pkg/security"
 	"istio.io/istio/pkg/util/gogoprotomarshal"
 	"istio.io/istio/security/pkg/credentialfetcher"
-	citadel "istio.io/istio/security/pkg/nodeagent/caclient/providers/citadel"
 	stsserver "istio.io/istio/security/pkg/stsservice/server"
 	"istio.io/istio/security/pkg/stsservice/tokenmanager"
 	cleaniptables "istio.io/istio/tools/istio-clean-iptables/pkg/cmd"
@@ -59,14 +56,15 @@ const (
 	trustworthyJWTPath = "./var/run/secrets/tokens/istio-token"
 	localHostIPv4      = "127.0.0.1"
 	localHostIPv6      = "[::1]"
+
+	// Similar with ISTIO_META_, which is used to customize the node metadata - this customizes extra header.
+	xdsHeaderPrefix = "XDS_HEADER_"
 )
 
 // TODO: Move most of this to pkg.
 
 var (
 	role               = &model.Proxy{}
-	proxyIP            string
-	registryID         serviceregistry.ProviderID
 	trustDomain        string
 	stsPort            int
 	tokenManagerPlugin string
@@ -74,23 +72,23 @@ var (
 	meshConfigFile string
 
 	// proxy config flags (named identically)
-	serviceCluster           string
-	proxyLogLevel            string
-	proxyComponentLogLevel   string
-	concurrency              int
-	templateFile             string
-	disableInternalTelemetry bool
-	loggingOptions           = log.DefaultOptions()
-	outlierLogPath           string
+	serviceCluster         string
+	proxyLogLevel          string
+	proxyComponentLogLevel string
+	concurrency            int
+	templateFile           string
+	loggingOptions         = log.DefaultOptions()
+	outlierLogPath         string
 
 	instanceIPVar        = env.RegisterStringVar("INSTANCE_IP", "", "")
 	podNameVar           = env.RegisterStringVar("POD_NAME", "", "")
 	podNamespaceVar      = env.RegisterStringVar("POD_NAMESPACE", "", "")
 	kubeAppProberNameVar = env.RegisterStringVar(status.KubeAppProberEnvName, "", "")
 	clusterIDVar         = env.RegisterStringVar("ISTIO_META_CLUSTER_ID", "", "")
+	callCredentials      = env.RegisterBoolVar("CALL_CREDENTIALS", false, "Use JWT directly instead of MTLS")
 
 	pilotCertProvider = env.RegisterStringVar("PILOT_CERT_PROVIDER", "istiod",
-		"the provider of Pilot DNS certificate.").Get()
+		"The provider of Pilot DNS certificate.").Get()
 	jwtPolicy = env.RegisterStringVar("JWT_POLICY", jwt.PolicyThirdParty,
 		"The JWT validation policy.")
 	// ProvCert is the environment controlling the use of pre-provisioned certs, for VMs.
@@ -98,6 +96,15 @@ var (
 	// with extra SAN (labels, etc) in data path.
 	provCert = env.RegisterStringVar("PROV_CERT", "",
 		"Set to a directory containing provisioned certs, for VMs").Get()
+
+	// set to "/etc/ssl/certs/ca-certificates.crt" on debian/ubuntu for ACME/public signed XDS servers.
+	xdsRootCA = env.RegisterStringVar("XDS_ROOT_CA", "",
+		"Explicitly set the root CA to expect for the XDS connection.").Get()
+
+	// set to "/etc/ssl/certs/ca-certificates.crt" on debian/ubuntu for ACME/public signed CA servers.
+	caRootCA = env.RegisterStringVar("CA_ROOT_CA", "",
+		"Explicitly set the root CA to expect for the CA connection.").Get()
+
 	outputKeyCertToDir = env.RegisterStringVar("OUTPUT_CERTS", "",
 		"The output directory for the key and certificate. If empty, key and certificate will not be saved. "+
 			"Must be set for VMs using provisioning certificates.").Get()
@@ -143,6 +150,12 @@ var (
 	skipParseTokenEnv = env.RegisterBoolVar("SKIP_PARSE_TOKEN", false,
 		"Skip Parse token to inspect information like expiration time in proxy. This may be possible "+
 			"for example in vm we don't use token to rotate cert.").Get()
+	proxyXDSViaAgent = env.RegisterBoolVar("ISTIO_META_PROXY_XDS_VIA_AGENT", false,
+		"If set to true, envoy will proxy XDS calls via the agent instead of directly connecting to istiod. This option "+
+			"will be removed once the feature is stabilized.").Get()
+	// This is a copy of the env var in the init code.
+	dnsCaptureByAgent = env.RegisterBoolVar("ISTIO_META_DNS_CAPTURE", false,
+		"If set to true, enable the capture of outgoing DNS packets on port 53, redirecting to istio-agent on :15053").Get()
 
 	rootCmd = &cobra.Command{
 		Use:          "pilot-agent",
@@ -184,9 +197,7 @@ var (
 				}
 			}
 
-			if len(proxyIP) != 0 {
-				role.IPAddresses = []string{proxyIP}
-			} else if podIP != nil {
+			if podIP != nil {
 				role.IPAddresses = []string{podIP.String()}
 			}
 
@@ -211,17 +222,11 @@ var (
 				role.IPAddresses = append(role.IPAddresses, "127.0.0.1")
 				role.IPAddresses = append(role.IPAddresses, "::1")
 			}
+			role.ID = podName + "." + podNamespace
 
 			// Check if proxy runs in ipv4 or ipv6 environment to set Envoy's
 			// operational parameters correctly.
 			proxyIPv6 := isIPv6Proxy(role.IPAddresses)
-			if len(role.ID) == 0 {
-				if registryID == serviceregistry.Kubernetes {
-					role.ID = podName + "." + podNamespace
-				} else {
-					role.ID = role.IPAddresses[0]
-				}
-			}
 
 			proxyConfig, err := constructProxyConfig()
 			if err != nil {
@@ -260,6 +265,10 @@ var (
 				UseTokenForCSR:     useTokenForCSREnv,
 				CredFetcher:        nil,
 			}
+			// If not set explicitly, default to the discovery address.
+			if caEndpointEnv == "" {
+				secOpts.CAEndpoint = proxyConfig.DiscoveryAddress
+			}
 			secOpts.PluginNames = strings.Split(pluginNamesEnv, ",")
 
 			secOpts.EnableWorkloadSDS = true
@@ -292,7 +301,19 @@ var (
 				secOpts.CredFetcher = credFetcher
 			}
 
-			sa := istio_agent.NewAgent(&proxyConfig, &istio_agent.AgentConfig{}, secOpts)
+			agentConfig := &istio_agent.AgentConfig{
+				XDSRootCerts: xdsRootCA,
+				CARootCerts:  caRootCA,
+				XDSHeaders:   map[string]string{},
+			}
+			extractXDSHeadersFromEnv(agentConfig)
+			if proxyXDSViaAgent {
+				agentConfig.ProxyXDSViaAgent = true
+				agentConfig.DNSCapture = dnsCaptureByAgent
+				agentConfig.ProxyNamespace = podNamespace
+				agentConfig.ProxyDomain = role.DNSDomain
+			}
+			sa := istio_agent.NewAgent(&proxyConfig, agentConfig, secOpts)
 
 			var pilotSAN []string
 			if proxyConfig.ControlPlaneAuthPolicy == meshconfig.AuthenticationPolicy_MUTUAL_TLS {
@@ -342,24 +363,6 @@ var (
 				defer stsServer.Stop()
 			}
 
-			// Start a local DNS server on 15053, forwarding to DNS-over-TLS server
-			// This will not have any impact on app unless interception is enabled.
-			// We can't start on 53 - istio-agent runs as user istio-proxy.
-			// This is available to apps even if interception is not enabled.
-
-			// TODO: replace hardcoded .global. Right now the ingress templates are
-			// hardcoding it as well, so there is little benefit to do it only here.
-			if dns.DNSTLSEnableAgent.Get() != "" {
-				// In the injection template the only place where global.proxy.clusterDomain
-				// is made available is in the --domain param.
-				// Instead of introducing a new config, use that.
-
-				dnsSrv := dns.InitDNSAgent(proxyConfig.DiscoveryAddress,
-					role.DNSDomain, sa.RootCert,
-					[]string{".global."})
-				dnsSrv.StartDNS(dns.DNSAgentAddr, nil)
-			}
-
 			envoyProxy := envoy.NewProxy(envoy.ProxyConfig{
 				Config:              proxyConfig,
 				Node:                role.ServiceNode(),
@@ -367,16 +370,13 @@ var (
 				ComponentLogLevel:   proxyComponentLogLevel,
 				PilotSubjectAltName: pilotSAN,
 				NodeIPs:             role.IPAddresses,
-				PodName:             podName,
-				PodNamespace:        podNamespace,
-				PodIP:               podIP,
 				STSPort:             stsPort,
-				ControlPlaneAuth:    proxyConfig.ControlPlaneAuthPolicy == meshconfig.AuthenticationPolicy_MUTUAL_TLS,
-				DisableReportCalls:  disableInternalTelemetry,
 				OutlierLogPath:      outlierLogPath,
 				PilotCertProvider:   pilotCertProvider,
-				ProvCert:            citadel.ProvCert,
+				ProvCert:            sa.FindRootCAForXDS(),
 				Sidecar:             role.Type == model.SidecarProxy,
+				ProxyViaAgent:       agentConfig.ProxyXDSViaAgent,
+				CallCredentials:     callCredentials.Get(),
 			})
 
 			drainDuration, _ := types.DurationFromProto(proxyConfig.TerminationDrainDuration)
@@ -398,6 +398,21 @@ var (
 		},
 	}
 )
+
+// Simplified extraction of gRPC headers from environment.
+// Unlike ISTIO_META, where we need JSON and advanced features - this is just for small string headers.
+func extractXDSHeadersFromEnv(config *istio_agent.AgentConfig) {
+	envs := os.Environ()
+	for _, e := range envs {
+		if strings.HasPrefix(e, xdsHeaderPrefix) {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			config.XDSHeaders[parts[0][len(xdsHeaderPrefix):]] = parts[1]
+		}
+	}
+}
 
 func initStatusServer(ctx context.Context, proxyIPv6 bool, proxyConfig meshconfig.ProxyConfig) error {
 	localHostAddr := localHostIPv4
@@ -421,24 +436,12 @@ func initStatusServer(ctx context.Context, proxyIPv6 bool, proxyConfig meshconfi
 
 func getDNSDomain(podNamespace, domain string) string {
 	if len(domain) == 0 {
-		if registryID == serviceregistry.Kubernetes {
-			domain = podNamespace + ".svc." + constants.DefaultKubernetesDomain
-		} else {
-			domain = ""
-		}
+		domain = podNamespace + ".svc." + constants.DefaultKubernetesDomain
 	}
 	return domain
 }
 
 func init() {
-	proxyCmd.PersistentFlags().StringVar((*string)(&registryID), "serviceregistry",
-		string(serviceregistry.Kubernetes),
-		fmt.Sprintf("Select the platform for service registry, options are {%s, %s}",
-			serviceregistry.Kubernetes, serviceregistry.Mock))
-	proxyCmd.PersistentFlags().StringVar(&proxyIP, "ip", "",
-		"Proxy IP address. If not provided uses ${INSTANCE_IP} environment variable.")
-	proxyCmd.PersistentFlags().StringVar(&role.ID, "id", "",
-		"Proxy unique ID. If not provided uses ${POD_NAME}.${POD_NAMESPACE} from environment variables")
 	proxyCmd.PersistentFlags().StringVar(&role.DNSDomain, "domain", "",
 		"DNS domain suffix. If not provided uses ${POD_NAMESPACE}.svc.cluster.local")
 	proxyCmd.PersistentFlags().StringVar(&trustDomain, "trust-domain", "",
@@ -463,8 +466,6 @@ func init() {
 		"The component log level used to start the Envoy proxy")
 	proxyCmd.PersistentFlags().StringVar(&templateFile, "templateFile", "",
 		"Go template bootstrap config")
-	proxyCmd.PersistentFlags().BoolVar(&disableInternalTelemetry, "disableInternalTelemetry", false,
-		"Disable internal telemetry")
 	proxyCmd.PersistentFlags().StringVar(&outlierLogPath, "outlierLogPath", "",
 		"The log path for outlier detection")
 

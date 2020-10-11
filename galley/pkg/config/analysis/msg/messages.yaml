@@ -32,9 +32,9 @@ messages:
 
   - name: "NamespaceNotInjected"
     code: IST0102
-    level: Warning
+    level: Info
     description: "A namespace is not enabled for Istio injection."
-    template: "The namespace is not enabled for Istio injection. Run 'kubectl label namespace %s istio-injection=enabled' to enable it, or 'kubectl label namespace %s istio-injection=disabled' to explicitly mark it as not needing injection"
+    template: "The namespace is not enabled for Istio injection. Run 'kubectl label namespace %s istio-injection=enabled' to enable it, or 'kubectl label namespace %s istio-injection=disabled' to explicitly mark it as not needing injection."
     args:
       - name: namespace
         type: string
@@ -328,4 +328,28 @@ messages:
       - name: host
         type: string
       - name: port
+        type: string
+
+  - name: "VirtualServiceUnreachableRule"
+    code: IST0130
+    level: Warning
+    description: "A VirtualService rule will never be used because a previous rule uses the same match."
+    template: "VirtualService rule %v not used (%s)."
+    args:
+      - name: ruleno
+        type: string
+      - name: reason
+        type: "string"
+
+  - name: "VirtualServiceIneffectiveMatch"
+    code: IST0131
+    level: Info
+    description: "A VirtualService rule match duplicates a match in a previous rule."
+    template: "VirtualService rule %v match %v is not used (duplicates a match in rule %v)."
+    args:
+      - name: ruleno
+        type: string
+      - name: matchno
+        type: string
+      - name: dupno
         type: string

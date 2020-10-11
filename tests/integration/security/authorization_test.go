@@ -29,6 +29,7 @@ import (
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
@@ -40,15 +41,24 @@ import (
 	rbacUtil "istio.io/istio/tests/integration/security/util/rbac_util"
 )
 
-type rootNS struct{}
+type rootNS struct {
+	rootNamespace string
+}
 
 func (i rootNS) Name() string {
-	return rootNamespace
+	return i.rootNamespace
+}
+
+func newRootNS(ctx framework.TestContext) rootNS {
+	return rootNS{
+		rootNamespace: istio.GetOrFail(ctx, ctx).Settings().SystemNamespace,
+	}
 }
 
 // TestAuthorization_mTLS tests v1beta1 authorization with mTLS.
 func TestAuthorization_mTLS(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.mtls-local").
 		Run(func(ctx framework.TestContext) {
 			// Create namespaces
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
@@ -107,6 +117,7 @@ func TestAuthorization_mTLS(t *testing.T) {
 // TestAuthorization_JWT tests v1beta1 authorization with JWT token claims.
 func TestAuthorization_JWT(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.jwt-token").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-jwt",
@@ -186,6 +197,7 @@ func TestAuthorization_JWT(t *testing.T) {
 // TestAuthorization_WorkloadSelector tests the workload selector for the v1beta1 policy in two namespaces.
 func TestAuthorization_WorkloadSelector(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.workload-selector").
 		Run(func(ctx framework.TestContext) {
 			ns1 := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-workload-1",
@@ -248,7 +260,7 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
 			args := map[string]string{
 				"Namespace1":    ns1.Name(),
 				"Namespace2":    ns2.Name(),
-				"RootNamespace": rootNamespace,
+				"RootNamespace": istio.GetOrFail(ctx, ctx).Settings().SystemNamespace,
 			}
 
 			applyPolicy := func(filename string, ns namespace.Instance) []string {
@@ -257,12 +269,13 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
 				return policy
 			}
 
+			rootns := newRootNS(ctx)
 			policyNS1 := applyPolicy("testdata/authz/v1beta1-workload-ns1.yaml.tmpl", ns1)
 			defer ctx.Config().DeleteYAMLOrFail(t, ns1.Name(), policyNS1...)
 			policyNS2 := applyPolicy("testdata/authz/v1beta1-workload-ns2.yaml.tmpl", ns2)
 			defer ctx.Config().DeleteYAMLOrFail(t, ns2.Name(), policyNS2...)
-			policyNSRoot := applyPolicy("testdata/authz/v1beta1-workload-ns-root.yaml.tmpl", rootNS{})
-			defer ctx.Config().DeleteYAMLOrFail(t, rootNS{}.Name(), policyNSRoot...)
+			policyNSRoot := applyPolicy("testdata/authz/v1beta1-workload-ns-root.yaml.tmpl", rootns)
+			defer ctx.Config().DeleteYAMLOrFail(t, rootns.Name(), policyNSRoot...)
 
 			rbacUtil.RunRBACTest(t, cases)
 		})
@@ -271,6 +284,7 @@ func TestAuthorization_WorkloadSelector(t *testing.T) {
 // TestAuthorization_Deny tests the authorization policy with action "DENY".
 func TestAuthorization_Deny(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.deny-action").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-deny",
@@ -319,7 +333,7 @@ func TestAuthorization_Deny(t *testing.T) {
 
 			args := map[string]string{
 				"Namespace":     ns.Name(),
-				"RootNamespace": rootNamespace,
+				"RootNamespace": istio.GetOrFail(ctx, ctx).Settings().SystemNamespace,
 			}
 
 			applyPolicy := func(filename string, ns namespace.Instance) []string {
@@ -328,10 +342,11 @@ func TestAuthorization_Deny(t *testing.T) {
 				return policy
 			}
 
+			rootns := newRootNS(ctx)
 			policy := applyPolicy("testdata/authz/v1beta1-deny.yaml.tmpl", ns)
 			defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), policy...)
-			policyNSRoot := applyPolicy("testdata/authz/v1beta1-deny-ns-root.yaml.tmpl", rootNS{})
-			defer ctx.Config().DeleteYAMLOrFail(t, rootNS{}.Name(), policyNSRoot...)
+			policyNSRoot := applyPolicy("testdata/authz/v1beta1-deny-ns-root.yaml.tmpl", rootns)
+			defer ctx.Config().DeleteYAMLOrFail(t, rootns.Name(), policyNSRoot...)
 
 			rbacUtil.RunRBACTest(t, cases)
 		})
@@ -340,6 +355,7 @@ func TestAuthorization_Deny(t *testing.T) {
 // TestAuthorization_NegativeMatch tests the authorization policy with negative match.
 func TestAuthorization_NegativeMatch(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.negative-match").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-negative-match-1",
@@ -430,6 +446,7 @@ func TestAuthorization_NegativeMatch(t *testing.T) {
 // TestAuthorization_IngressGateway tests the authorization policy on ingress gateway.
 func TestAuthorization_IngressGateway(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.ingress-gateway").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-ingress-gateway",
@@ -437,7 +454,7 @@ func TestAuthorization_IngressGateway(t *testing.T) {
 			})
 			args := map[string]string{
 				"Namespace":     ns.Name(),
-				"RootNamespace": rootNamespace,
+				"RootNamespace": istio.GetOrFail(ctx, ctx).Settings().SystemNamespace,
 			}
 
 			applyPolicy := func(filename string) []string {
@@ -508,6 +525,7 @@ func TestAuthorization_IngressGateway(t *testing.T) {
 // TestAuthorization_EgressGateway tests v1beta1 authorization on egress gateway.
 func TestAuthorization_EgressGateway(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.egress-gateway").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-egress-gateway",
@@ -534,7 +552,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
 
 			args := map[string]string{
 				"Namespace":     ns.Name(),
-				"RootNamespace": rootNamespace,
+				"RootNamespace": istio.GetOrFail(ctx, ctx).Settings().SystemNamespace,
 			}
 			policies := tmpl.EvaluateAllOrFail(t, args,
 				file.AsStringOrFail(t, "testdata/authz/v1beta1-egress-gateway.yaml.tmpl"))
@@ -681,6 +699,7 @@ func TestAuthorization_EgressGateway(t *testing.T) {
 // TestAuthorization_TCP tests the authorization policy on workloads using the raw TCP protocol.
 func TestAuthorization_TCP(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.tcp").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-tcp-1",
@@ -826,6 +845,7 @@ func TestAuthorization_TCP(t *testing.T) {
 // TestAuthorization_Conditions tests v1beta1 authorization with conditions.
 func TestAuthorization_Conditions(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.conditions").
 		Run(func(ctx framework.TestContext) {
 			nsA := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-conditions-a",
@@ -950,6 +970,7 @@ func TestAuthorization_Conditions(t *testing.T) {
 // TestAuthorization_GRPC tests v1beta1 authorization with gRPC protocol.
 func TestAuthorization_GRPC(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.grpc-protocol").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-grpc",
@@ -1014,6 +1035,7 @@ func TestAuthorization_GRPC(t *testing.T) {
 // with path "/a/../b" should be normalized to "/b" before using in authorization.
 func TestAuthorization_Path(t *testing.T) {
 	framework.NewTest(t).
+		Features("security.authorization.path-normalization").
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "v1beta1-path",
@@ -1127,7 +1149,7 @@ func TestAuthorization_Audit(t *testing.T) {
 
 			args := map[string]string{
 				"Namespace":     ns.Name(),
-				"RootNamespace": rootNamespace,
+				"RootNamespace": istio.GetOrFail(ctx, ctx).Settings().SystemNamespace,
 			}
 
 			applyPolicy := func(filename string, ns namespace.Instance) []string {

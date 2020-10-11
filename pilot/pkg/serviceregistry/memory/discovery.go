@@ -29,8 +29,7 @@ import (
 
 // ServiceController is a mock service controller
 type ServiceController struct {
-	svcHandlers  []func(*model.Service, model.Event)
-	instHandlers []func(*model.ServiceInstance, model.Event)
+	svcHandlers []func(*model.Service, model.Event)
 
 	sync.RWMutex
 }
@@ -50,14 +49,6 @@ func (c *ServiceController) AppendServiceHandler(f func(*model.Service, model.Ev
 	return nil
 }
 
-// AppendInstanceHandler appends a service instance handler to the controller
-func (c *ServiceController) AppendInstanceHandler(f func(*model.ServiceInstance, model.Event)) error {
-	c.Lock()
-	c.instHandlers = append(c.instHandlers, f)
-	c.Unlock()
-	return nil
-}
-
 // Run will run the controller
 func (c *ServiceController) Run(<-chan struct{}) {}
 
@@ -66,7 +57,8 @@ func (c *ServiceController) HasSynced() bool { return true }
 
 // ServiceDiscovery is a mock discovery interface
 type ServiceDiscovery struct {
-	services map[host.Name]*model.Service
+	services        map[host.Name]*model.Service
+	networkGateways map[string][]*model.Gateway
 	// EndpointShards table. Key is the fqdn of the service, ':', port
 	instancesByPortNum  map[string][]*model.ServiceInstance
 	instancesByPortName map[string][]*model.ServiceInstance
@@ -107,6 +99,7 @@ func NewServiceDiscovery(services []*model.Service) *ServiceDiscovery {
 		instancesByPortName: map[string][]*model.ServiceInstance{},
 		ip2instance:         map[string][]*model.ServiceInstance{},
 		ip2workloadLabels:   map[string]*labels.Instance{},
+		networkGateways:     map[string][]*model.Gateway{},
 	}
 }
 
@@ -157,7 +150,7 @@ func (sd *ServiceDiscovery) AddInstance(service host.Name, instance *model.Servi
 		return
 	}
 	instance.Service = svc
-	sd.ip2instance[instance.Endpoint.Address] = []*model.ServiceInstance{instance}
+	sd.ip2instance[instance.Endpoint.Address] = append(sd.ip2instance[instance.Endpoint.Address], instance)
 
 	key := fmt.Sprintf("%s:%d", service, instance.ServicePort.Port)
 	instanceList := sd.instancesByPortNum[key]
@@ -335,4 +328,12 @@ func (sd *ServiceDiscovery) GetIstioServiceAccounts(svc *model.Service, ports []
 		}
 	}
 	return make([]string, 0)
+}
+
+func (sd *ServiceDiscovery) SetGatewaysForNetwork(nw string, gws ...*model.Gateway) {
+	sd.networkGateways[nw] = gws
+}
+
+func (sd *ServiceDiscovery) NetworkGateways() map[string][]*model.Gateway {
+	return sd.networkGateways
 }

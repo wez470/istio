@@ -36,6 +36,8 @@ var (
 	}
 )
 
+var _ model.ServiceDiscovery = &ServiceDiscovery{}
+
 // NewDiscovery builds a memory ServiceDiscovery
 func NewDiscovery(services map[host.Name]*model.Service, versions int) *ServiceDiscovery {
 	return &ServiceDiscovery{
@@ -241,13 +243,14 @@ func (sd *ServiceDiscovery) GetIstioServiceAccounts(svc *model.Service, ports []
 	return make([]string, 0)
 }
 
+func (sd *ServiceDiscovery) NetworkGateways() map[string][]*model.Gateway {
+	// TODO use logic from kube controller if needed
+	panic("implement me")
+}
+
 type Controller struct{}
 
 func (c *Controller) AppendServiceHandler(f func(*model.Service, model.Event)) error {
-	return nil
-}
-
-func (c *Controller) AppendInstanceHandler(f func(*model.ServiceInstance, model.Event)) error {
 	return nil
 }
 
