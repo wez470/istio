@@ -383,9 +383,6 @@ func (s *NodeMetaProxyConfig) UnmarshalJSON(data []byte) error {
 type BootstrapNodeMetadata struct {
 	NodeMetadata
 
-	// ExchangeKeys specifies a list of metadata keys that should be used for Node Metadata Exchange.
-	ExchangeKeys StringList `json:"EXCHANGE_KEYS,omitempty"`
-
 	// InstanceName is the short name for the workload instance (ex: pod name)
 	// replaces POD_NAME
 	InstanceName string `json:"NAME,omitempty"`
@@ -492,8 +489,8 @@ type NodeMetadata struct {
 	// DNSCapture indicates whether the workload has enabled dns capture
 	DNSCapture string `json:"DNS_CAPTURE,omitempty"`
 
-	// ProxyXDSViaAgent indicates that xds data is being proxied via the agent
-	ProxyXDSViaAgent string `json:"PROXY_XDS_VIA_AGENT,omitempty"`
+	// AutoRegister will enable auto registration of the connected endpoint to the service registry using the given WorkloadGroup name
+	AutoRegisterGroup string `json:"AUTO_REGISTER_GROUP,omitempty"`
 
 	// Contains a copy of the raw metadata. This is needed to lookup arbitrary values.
 	// If a value is known ahead of time it should be added to the struct rather than reading from here,
@@ -677,12 +674,8 @@ func (node *Proxy) SetGatewaysForProxy(ps *PushContext) {
 	node.MergedGateway = ps.mergeGateways(node)
 }
 
-func (node *Proxy) SetServiceInstances(serviceDiscovery ServiceDiscovery) error {
-	instances, err := serviceDiscovery.GetProxyServiceInstances(node)
-	if err != nil {
-		log.Errorf("failed to get service proxy service instances: %v", err)
-		return err
-	}
+func (node *Proxy) SetServiceInstances(serviceDiscovery ServiceDiscovery) {
+	instances := serviceDiscovery.GetProxyServiceInstances(node)
 
 	// Keep service instances in order of creation/hostname.
 	sort.SliceStable(instances, func(i, j int) bool {
@@ -697,26 +690,20 @@ func (node *Proxy) SetServiceInstances(serviceDiscovery ServiceDiscovery) error 
 	})
 
 	node.ServiceInstances = instances
-	return nil
 }
 
 // SetWorkloadLabels will set the node.Metadata.Labels only when it is nil.
-func (node *Proxy) SetWorkloadLabels(env *Environment) error {
+func (node *Proxy) SetWorkloadLabels(env *Environment) {
 	// First get the workload labels from node meta
 	if len(node.Metadata.Labels) > 0 {
-		return nil
+		return
 	}
 
 	// Fallback to calling GetProxyWorkloadLabels
-	l, err := env.GetProxyWorkloadLabels(node)
-	if err != nil {
-		log.Errorf("failed to get service proxy labels: %v", err)
-		return err
-	}
+	l := env.GetProxyWorkloadLabels(node)
 	if len(l) > 0 {
 		node.Metadata.Labels = l[0]
 	}
-	return nil
 }
 
 // DiscoverIPVersions discovers the IP Versions supported by Proxy based on its IP addresses.
@@ -728,7 +715,7 @@ func (node *Proxy) DiscoverIPVersions() {
 			// skip it to prevent a panic.
 			continue
 		}
-		if addr.IsGlobalUnicast() {
+		if node.GlobalUnicastIP == "" && addr.IsGlobalUnicast() {
 			node.GlobalUnicastIP = addr.String()
 		}
 		if addr.To4() != nil {
@@ -948,7 +935,3 @@ func (node *Proxy) GetInterceptionMode() TrafficInterceptionMode {
 
 	return InterceptionRedirect
 }
-
-// SidecarDNSListenerPort specifes the port at which the sidecar hosts a DNS resolver listener.
-// TODO: customize me. tools/istio-iptables package also has this hardcoded.
-const SidecarDNSListenerPort = 15013
